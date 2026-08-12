@@ -1,9 +1,10 @@
 # Code index
 
-| File or directory | Responsibility |
+| File or directory | Responsibility / exact anchors |
 | --- | --- |
-| `core.lua` | defaults, SavedVariables, aura-container scanning, button styling, Masque bridge, refresh events |
-| `options.lua` | settings canvas, controls, apply/reset behaviour |
-| `libs/` | embedded LibStub, CallbackHandler-1.0, and LibSharedMedia-3.0 |
+| [`core.lua`](core.lua) | `EnsureDefaults`, `ResolveMedia`, `StyleButton`, `ScanContainer`, `DoUpdate`, `RequestUpdate`, `RothShinyBuffs_ApplySettings`; owns DB, event frame, overlays and Masque bridge |
+| [`options.lua`](options.lua) | `RegisterPanel`, `Build`, `Refresh`, control setters; writes DB then invokes `RothShinyBuffs_ApplySettings` |
+| [`libs/`](libs/) | bundled `LibStub`, `CallbackHandler-1.0`, `LibSharedMedia-3.0` |
+| [`media/`](media/) | bundled border/background textures registered by `RegisterBuiltInMedia` |
 
-Primary anchors: `RothShinyBuffs_ApplySettings`, `DoUpdate`, `StyleButton`, `InitMasque`, and `Build` in `options.lua`.
+Entry is TOC-driven; there is no slash command or separate service layer. `RothShinyBuffsDB` is the only persistent state.
