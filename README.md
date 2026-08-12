@@ -18,3 +18,7 @@ Open **Options → AddOns → RothShinyBuffs**. The checked-in options UI applie
 ## Current development status
 
 No unfinished implementation items were found in the checked-in addon documentation. The current open verification item is an in-game smoke test of styling, options application, and optional Masque behaviour on the target client. The original concise usage notes remain in [README.txt](README.txt).
+
+## License
+
+Licensed under the [MIT License](LICENSE). Bundled third-party components remain under their own notices.
