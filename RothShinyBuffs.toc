@@ -1,0 +1,14 @@
+## Interface: 120000
+## Title: RothShinyBuffs
+## Notes: Galaxy-style aura frames (SharedMedia + optional Masque), Edit Mode friendly
+## Author: Galaxy (Roth UI) / Neomorph
+## Version: 0.40
+## SavedVariables: RothShinyBuffsDB
+## OptionalDeps: Masque
+
+libs\LibStub\LibStub.lua
+libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+
+core.lua
+options.lua
