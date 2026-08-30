@@ -2,63 +2,166 @@
 
 ## Start here
 
-Read [`RothShinyBuffs.toc`](RothShinyBuffs.toc), then [`core.lua`](core.lua) and [`options.lua`](options.lua). `core.lua` is the runtime owner; `options.lua` only builds Settings UI and calls the two exported core functions `RothShinyBuffs_EnsureDefaults` and `RothShinyBuffs_ApplySettings`.
+[`RothShinyBuffs.toc`](RothShinyBuffs.toc) is the definitive load contract. Retail 12.1 loads bundled LibStub, CallbackHandler-1.0 and LibSharedMedia-3.0, then `core.lua`, then `options.lua`.
 
-TOC release metadata is `0.40` (`RothShinyBuffs.toc`, `## Version`).
+Target contract:
 
-## Load order and execution path
+- Retail / Midnight `12.1.0`;
+- Interface `120100`;
+- verified Blizzard source baseline `12.1.0.69497`;
+- one SavedVariables root: `RothShinyBuffsDB`;
+- no external addon dependency.
 
-The TOC loads embedded `LibStub`, `CallbackHandler-1.0`, and `LibSharedMedia-3.0`, followed by `core.lua`, then `options.lua`. `core.lua` creates/merges `RothShinyBuffsDB`, registers built-in media, resolves the current media, and registers `PLAYER_LOGIN`, `PLAYER_ENTERING_WORLD`, `UNIT_AURA`, and `ADDON_LOADED`. `PLAYER_LOGIN` schedules three delayed scans; `UNIT_AURA` for `player` queues a throttled scan; `ADDON_LOADED` queues a scan when `Blizzard_BuffFrame` becomes available.
+## Why the runtime is static-slot only
 
-Complete `loadedFiles` inventory (root `docs/addon-architecture.json`, in execution order):
+Pinned Blizzard source defines `BUFF_MAX_DISPLAY = 32` and `DEBUFF_MAX_DISPLAY = 16`. `AuraFrameMixin:AuraFrame_OnLoad()` pre-creates ordinary aura buttons in `self.auraFrames`, then appends private aura anchors separately.
+
+Patch 12.1 makes aura assignment and managed aura presentation restricted. Therefore the addon must not discover currently active buttons through pools, visibility, `hasValidInfo`, icon texture contents, examples, layout state, or private-anchor state.
+
+The only allowed slot sources are:
 
 ```text
-libs/LibStub/LibStub.lua
-libs/CallbackHandler-1.0/CallbackHandler-1.0.lua
-libs/LibSharedMedia-3.0/LibSharedMedia-3.0.lua
-core.lua
-options.lua
+BuffFrame.auraFrames[1..32]
+DebuffFrame.auraFrames[1..16]
+DeadlyDebuffFrame.Debuff
 ```
 
-The render path is `RequestUpdate` -> `DoUpdate` -> `GetAuraContainers` -> `ScanContainer` -> `StyleButton`. Active aura buttons are discovered from Blizzard aura pools/tables. Non-Masque mode creates `RSB_OverlayFrame` with either `RSB_Strip` or `RSB_Full`; Masque mode creates `RSB_MSQFrame`, hides the original icon and feeds the overlay to `MSQ_Group`.
+A slot is accepted only when `button.Icon` is an accessible Texture supporting `SetTexCoord`. Do not broaden this to aliases, pool scans or child-tree searches without new source/runtime evidence.
 
-## State and surfaces
+## Runtime map
 
-- SavedVariables: `RothShinyBuffsDB` (`enabled`, `useMasque`, `mode`, border/background visibility, geometry, media names, colors, `configVersion`).
-- Options: Blizzard Settings category named `RothShinyBuffs`; no slash command is registered.
-- Public runtime anchors: `RothShinyBuffs_EnsureDefaults`, `RothShinyBuffs_ApplySettings`.
-- Bundled media is registered under `Interface\\AddOns\\RothShinyBuffs\\media\\`; do not replace these names with arbitrary paths in settings.
+### Defaults and media
 
-## Dependencies and relationships
+`EnsureDefaults` owns schema/default migration and removes the retired `useMasque` key. Numeric geometry values are bounded, colors are copied as ordinary four-number arrays, and mode is closed to `galaxy_strip` or `full_border`.
 
-`LibSharedMedia-3.0` is bundled and requires the bundled `LibStub`/`CallbackHandler-1.0`. `Masque` is an optional external dependency declared in the TOC; failure to load it intentionally falls back to local overlays. The addon touches Blizzard's aura button presentation only and deliberately does not move or resize Blizzard aura containers. No checked-in addon in this workspace calls RothShinyBuffs APIs.
+`RegisterBuiltInMedia` registers the bundled strip, border and background textures with LibSharedMedia. `ResolveConfig` resolves stored media names with explicit bundled fallbacks.
 
-Falsification notes: the addon has no slash command, no `COMBAT_LOG_EVENT_UNFILTERED` registration, no Cooldown Manager (CDM) integration, and no permanent `OnUpdate` loop. The only optional render bridge is Masque; the only bundled media library is LibSharedMedia.
+### Slot presentation
+
+`StyleSourceConfirmedSlots` calls `StyleArray` with fixed limits. It does not use `#auraFrames` and does not visit DebuffFrame entries after index 16, so appended private aura anchors are excluded by construction.
+
+`StyleSlot`:
+
+1. validates only the source-confirmed `button.Icon` object type;
+2. creates weakly tracked addon-owned textures outside combat;
+3. captures original icon texture coordinates once;
+4. applies crop and background;
+5. applies either the full-border texture or eight strip tiles;
+6. leaves every Blizzard-owned region, script, event, tooltip, parent, size and visibility property untouched.
+
+`HideState` hides addon-owned textures and restores captured icon coordinates. Do not modify Blizzard Border, DebuffBorder, IconBorder, Duration, Count, Cooldown or aura frame alpha as a substitute.
+
+### Combat and lifecycle
+
+`ApplySettings` is the only apply boundary. During combat it sets `pendingApply` and returns without frame/texture creation or geometry/crop mutation. `PLAYER_REGEN_ENABLED` applies the latest SavedVariables state once.
+
+The event frame registers only:
+
+```text
+ADDON_LOADED
+PLAYER_LOGIN
+PLAYER_ENTERING_WORLD
+PLAYER_REGEN_ENABLED
+```
+
+`ADDON_LOADED Blizzard_BuffFrame` retries the same fixed-slot apply after the Blizzard addon becomes available. There is no aura-state listener.
+
+### Settings
+
+`options.lua` registers a current canvas category through `Settings.RegisterCanvasLayoutCategory`. The canvas exposes enabled state, border/background visibility, visual mode, crop, geometry, LibSharedMedia names, colors and reset.
+
+Every setter writes SavedVariables and calls `_G.RothShinyBuffs_ApplySettings`. The core remains the sole runtime owner and enforces combat deferral.
+
+The color picker prefers `ColorPickerFrame:SetupColorPickerAndShow` and has a compatibility fallback. No Masque option remains.
+
+## Hard invariants
+
+- Never register `UNIT_AURA` for styling.
+- Never inspect raw `AuraData`, `auraInfo`, `hasValidInfo`, `isExample`, `isAuraAnchor`, button visibility, alpha, icon texture, child count, layout count or active pool membership.
+- Never call `EnumerateActive`, `GetChildren`, `GetNumChildren`, `C_UnitAuras`, or `AuraUtil.ForEachAura`.
+- Never use managed aura objects as visibility/layout/event/focus side channels.
+- Never create addon textures or change crop/geometry in combat.
+- Never hide Blizzard aura state regions to force one visual owner.
+- Keep `styledSlots` weak-keyed.
+- Keep source-confirmed limits at 32 buffs and 16 debuffs unless a newer pinned Blizzard source changes the constants.
+- Keep private anchors excluded by numeric range and icon validation, not by reading their state fields.
+- Do not restore the Masque bridge without a new design that does not copy or follow active aura state.
+
+## State
+
+Durable keys:
+
+- `configVersion`;
+- `enabled`, `showBorder`, `showBG`;
+- `mode`;
+- `iconCrop`, `edgeSize`, `outset`, `bgOutset`;
+- `bgColor`, `borderColor`;
+- `stripBorderName`, `borderName`, `bgName`.
+
+Runtime-only state:
+
+- resolved media/config cache;
+- weak slot-to-overlay map;
+- original icon texture coordinates;
+- initialization and pending-apply flags;
+- Settings category ID.
+
+## Commands
+
+```text
+/rsb
+/rsb toggle
+/rsb reset
+/rsb config
+```
+
+The status output reports only the number of statically accepted public slots and whether an apply is pending. It does not report active aura count.
 
 ## Change routing
 
-- Change detection, throttling, aura pools, overlay geometry, Masque bridge, or render semantics in [`core.lua`](core.lua).
-- Change controls/default display and Settings registration in [`options.lua`](options.lua); route every setter through `RothShinyBuffs_ApplySettings`.
-- Change bundled visual assets under [`media/`](media/), and update the LSM registration and option defaults together.
-- Change SavedVariables schema only with a migration/version policy; `EnsureDefaults` currently fills missing keys but does not migrate renamed keys.
-
-## Invariants and risks
-
-- Never own Blizzard aura-container layout; Edit Mode remains the layout authority.
-- `UNIT_AURA` is throttled (`MIN_REQ_INTERVAL = 0.30`) and uses a short timer; do not add a permanent `OnUpdate` loop.
-- Do not style example/invalid buttons or call `GetTexture` on absent icons.
-- In Masque mode local borders/backgrounds are hidden and the original icon is alpha-hidden; when changing this, preserve the no-double-render invariant.
-- Aura button frames are Blizzard-owned. Hiding borders/setting icon alpha can become taint-sensitive if protected frames are touched; verify with `ADDON_ACTION_BLOCKED` and in-combat testing.
-- The code assumes Blizzard aura containers expose one of the known pool/table fields. A client UI refactor can silently reduce coverage.
+- defaults, access gates, media and slot styling: `core.lua`;
+- fixed-slot limits and lifecycle: `core.lua`;
+- Settings canvas and color/media controls: `options.lua`;
+- offline regression: `tests/test_static_slots.lua`;
+- metadata/load order/dependencies: `RothShinyBuffs.toc`;
+- durable visual explanation: README and architecture.
 
 ## Verification
 
-1. Confirm TOC file order and all referenced files exist.
-2. Parse all Lua with the repository's Lua 5.1 check.
-3. In-game: `/reload`; open Settings; toggle `enabled`, mode, colors, geometry, and Masque; inspect player buffs/debuffs through `UNIT_AURA`, `PLAYER_LOGIN`, and `Blizzard_BuffFrame` load timing.
-4. Verify no aura container moves/resizes, no duplicate borders appear, and no `ADDON_ACTION_BLOCKED`/Lua errors occur in combat.
-5. With Masque absent, confirm local overlay fallback; with Masque enabled, confirm `RSB_MSQFrame` is the only visual path.
+From the repository root:
 
-## Uncertain or version-sensitive claims
+```sh
+texlua --luaconly core.lua
+texlua --luaconly options.lua
+texlua --luaconly tests/test_static_slots.lua
+texlua tests/test_static_slots.lua
+```
 
-The exact Blizzard aura pool field names and the availability of `Settings.RegisterCanvasLayoutCategory` are build-sensitive; the implementation has fallbacks but they require live-client verification. `LibSharedMedia` availability is expected because it is bundled, but the silent fallback path remains intentionally defensive.
+Expected runtime result:
+
+```text
+PASS: only fixed public aura slots are styled; active aura state is never scanned; combat apply is deferred
+```
+
+Static source checks should find no runtime occurrences of:
+
+```text
+UNIT_AURA
+EnumerateActive
+GetChildren
+GetNumChildren
+hasValidInfo
+isExample
+GetTexture(
+IsShown(
+C_UnitAuras
+AuraUtil.ForEachAura
+Masque
+C_Timer
+```
+
+The only retained `useMasque` occurrence may be the migration assignment `DB.useMasque = nil`.
+
+In the target client, test normal buffs/debuffs, Edit Mode example auras, DeadlyDebuffFrame, both modes, media/color controls, enable/disable/reset, login/reload/world transitions, combat-time setting changes, private aura scenarios, and `/console taintLog 1` plus Lua error capture.
+
+Static/mocked evidence does not prove live visual layering or restricted-object behavior. Record the exact build and scenario for each result.

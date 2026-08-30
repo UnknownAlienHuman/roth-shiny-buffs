@@ -1,595 +1,484 @@
--- RothShinyBuffs (Midnight 12.0) - Galaxy-style aura framing with SharedMedia + optional Masque
--- Goals:
---   * Keep aura layout under Blizzard Edit Mode (we don't move or resize aura containers).
---   * No BackdropTemplate / SetBackdrop (avoids secret width/height arithmetic).
---   * No OnUpdate loops.
---   * Minimal work on UNIT_AURA (throttled, only styles active aura buttons).
---
--- Author: Galaxy (Roth UI) - extracted & Midnight-sanitized
+-- RothShinyBuffs runtime owner for Retail 12.1.
+-- Blizzard owns aura assignment, visibility, layout, duration, and restricted
+-- state. This addon styles only source-confirmed, pre-created public slots.
 
 local ADDON_NAME = ...
 if ADDON_NAME ~= "RothShinyBuffs" then return end
 
-------------------------------------------------------------
--- SavedVariables
-------------------------------------------------------------
-RothShinyBuffsDB = RothShinyBuffsDB or {}
-local DB = RothShinyBuffsDB
+local unpack = table.unpack or unpack
+local BUFF_SLOT_COUNT = 32
+local DEBUFF_SLOT_COUNT = 16
+local TILE_WIDTH = 1 / 8
 
-------------------------------------------------------------
--- LibSharedMedia (embedded) + Masque (optional)
-------------------------------------------------------------
-local LibStub = LibStub
-local LSM = LibStub and LibStub("LibSharedMedia-3.0", true) or nil
-
-local MSQ, MSQ_Group
-
-local function InitMasque()
-  if MSQ_Group then return end
-  if not LibStub then return end
-  MSQ = LibStub("Masque", true)
-  if not MSQ then return end
-  MSQ_Group = MSQ:Group("RothShinyBuffs", "Auras")
-end
-
-------------------------------------------------------------
--- Defaults / Config cache
-------------------------------------------------------------
-local function CopyColor(c)
-  return { c[1], c[2], c[3], c[4] }
-end
+local FALLBACK_MEDIA = {
+  strip = "Interface\\AddOns\\RothShinyBuffs\\media\\5.tga",
+  border = "Interface\\AddOns\\RothShinyBuffs\\media\\border64.tga",
+  background = "Interface\\AddOns\\RothShinyBuffs\\media\\Solid.tga",
+}
 
 local DEFAULTS = {
-  configVersion = 40,
+  configVersion = 50,
   enabled = true,
-
-  -- Visual system:
-  --   useMasque = true => Masque owns visuals (we do not draw our overlays).
-  --   useMasque = false => we draw Galaxy-style overlays behind the icon.
-  useMasque = false,
-
   showBorder = true,
   showBG = true,
-
-  -- Modes:
-  --   "galaxy_strip": 8-tile strip (5.tga) for corners+edges
-  --   "full_border": single border texture stretched around the icon
   mode = "galaxy_strip",
-
-  -- Icon crop when NOT using Masque
   iconCrop = 0.07,
-
-  -- Geometry for our overlays
-  edgeSize = 16,     -- strip tile size in px
-  outset = 3,        -- how far border extends beyond icon
-  bgOutset = 2,      -- background extends beyond icon
-
+  edgeSize = 16,
+  outset = 3,
+  bgOutset = 2,
   bgColor = { 0.32, 0.32, 0.32, 1.00 },
   borderColor = { 0.50, 0.50, 0.50, 1.00 },
-
-  -- SharedMedia names (no raw paths in settings)
   stripBorderName = "RothShinyBuffs: Galaxy Strip",
-  borderName      = "RothShinyBuffs: Border64",
-  bgName          = "RothShinyBuffs: Solid",
+  borderName = "RothShinyBuffs: Border64",
+  bgName = "RothShinyBuffs: Solid",
 }
 
-local cfg = {
-  stripTex = nil,
-  borderTex = nil,
-  bgTex = nil,
-  bgColor = CopyColor(DEFAULTS.bgColor),
-  borderColor = CopyColor(DEFAULTS.borderColor),
-  iconCrop = DEFAULTS.iconCrop,
-  edgeSize = DEFAULTS.edgeSize,
-  outset = DEFAULTS.outset,
-  bgOutset = DEFAULTS.bgOutset,
-}
+local DB
+local config = {}
+local initialized = false
+local pendingApply = false
+local styledSlots = setmetatable({}, { __mode = "k" })
 
-local function EnsureDefaults()
-  for k, v in pairs(DEFAULTS) do
-    if DB[k] == nil then
-      -- deep copy colors
-      if type(v) == "table" then
-        DB[k] = CopyColor(v)
-      else
-        DB[k] = v
-      end
-    end
+local function CanAccess(value)
+  if type(canaccessvalue) == "function" then
+    local ok, accessible = pcall(canaccessvalue, value)
+    return ok and accessible == true
   end
+  if type(issecretvalue) == "function" then
+    local ok, secret = pcall(issecretvalue, value)
+    return ok and secret ~= true
+  end
+  return true
 end
 
-function RothShinyBuffs_EnsureDefaults()
-  EnsureDefaults()
+local function SafeBoolean(value)
+  if not CanAccess(value) or type(value) ~= "boolean" then return nil end
+  return value
+end
+
+local function SafeNumber(value)
+  if not CanAccess(value) or type(value) ~= "number" or value ~= value then return nil end
+  return value
+end
+
+local function SafeString(value)
+  if not CanAccess(value) or type(value) ~= "string" then return nil end
+  return value
+end
+
+local function SafeTable(value)
+  if not CanAccess(value) or type(value) ~= "table" then return nil end
+  if type(issecrettable) == "function" then
+    local ok, secret = pcall(issecrettable, value)
+    if not ok or secret == true then return nil end
+  end
+  return value
+end
+
+local function SafeField(object, key)
+  if not CanAccess(object) then return nil end
+  local objectType = type(object)
+  if objectType ~= "table" and objectType ~= "userdata" then return nil end
+  local ok, value = pcall(function() return object[key] end)
+  if not ok or not CanAccess(value) then return nil end
+  return value
+end
+
+local function CanUseObject(object)
+  if object == nil or not CanAccess(object) then return false end
+  local objectType = type(object)
+  if objectType ~= "table" and objectType ~= "userdata" then return false end
+
+  local accessMethod = SafeField(object, "CanBeAccessedInContext")
+  if type(accessMethod) == "function" then
+    local ok, accessible = pcall(accessMethod, object)
+    if not ok or SafeBoolean(accessible) ~= true then return false end
+  end
+
+  local forbiddenMethod = SafeField(object, "IsForbidden")
+  if type(forbiddenMethod) == "function" then
+    local ok, forbidden = pcall(forbiddenMethod, object)
+    if not ok or SafeBoolean(forbidden) ~= false then return false end
+  end
+  return true
+end
+
+local function Method(object, methodName)
+  if not CanUseObject(object) then return nil end
+  local method = SafeField(object, methodName)
+  return type(method) == "function" and method or nil
+end
+
+local function SafeCall(object, methodName, ...)
+  local method = Method(object, methodName)
+  if not method then return false end
+  return pcall(method, object, ...)
+end
+
+local function SafeGet(object, methodName, ...)
+  local method = Method(object, methodName)
+  if not method then return nil end
+  local values = { pcall(method, object, ...) }
+  if not values[1] then return nil end
+  table.remove(values, 1)
+  for index = 1, #values do
+    if not CanAccess(values[index]) then return nil end
+  end
+  return unpack(values)
+end
+
+local function InCombat()
+  if type(InCombatLockdown) ~= "function" then return false end
+  local ok, value = pcall(InCombatLockdown)
+  return ok and SafeBoolean(value) == true
+end
+
+local function ReadDBField(tableValue, key)
+  local tableObject = SafeTable(tableValue)
+  if not tableObject then return nil end
+  local ok, value = pcall(function() return tableObject[key] end)
+  if not ok or not CanAccess(value) then return nil end
+  return value
+end
+
+local function CopyColor(color, fallback)
+  local source = SafeTable(color) or fallback
+  return {
+    SafeNumber(ReadDBField(source, 1)) or fallback[1],
+    SafeNumber(ReadDBField(source, 2)) or fallback[2],
+    SafeNumber(ReadDBField(source, 3)) or fallback[3],
+    SafeNumber(ReadDBField(source, 4)) or fallback[4],
+  }
+end
+
+local function Clamp(value, fallback, minimum, maximum)
+  value = SafeNumber(value)
+  if value == nil then return fallback end
+  if value < minimum then return minimum end
+  if value > maximum then return maximum end
+  return value
+end
+
+local function EnsureDefaults()
+  local root = SafeTable(_G.RothShinyBuffsDB) or {}
+  _G.RothShinyBuffsDB = root
+  DB = root
+
+  DB.configVersion = 50
+  DB.enabled = SafeBoolean(ReadDBField(DB, "enabled")) ~= false
+  DB.showBorder = SafeBoolean(ReadDBField(DB, "showBorder")) ~= false
+  DB.showBG = SafeBoolean(ReadDBField(DB, "showBG")) ~= false
+  DB.mode = SafeString(ReadDBField(DB, "mode")) == "full_border" and "full_border" or "galaxy_strip"
+  DB.iconCrop = Clamp(ReadDBField(DB, "iconCrop"), DEFAULTS.iconCrop, 0, 0.20)
+  DB.edgeSize = Clamp(ReadDBField(DB, "edgeSize"), DEFAULTS.edgeSize, 4, 64)
+  DB.outset = Clamp(ReadDBField(DB, "outset"), DEFAULTS.outset, 0, 24)
+  DB.bgOutset = Clamp(ReadDBField(DB, "bgOutset"), DEFAULTS.bgOutset, 0, 24)
+  DB.bgColor = CopyColor(ReadDBField(DB, "bgColor"), DEFAULTS.bgColor)
+  DB.borderColor = CopyColor(ReadDBField(DB, "borderColor"), DEFAULTS.borderColor)
+  DB.stripBorderName = SafeString(ReadDBField(DB, "stripBorderName")) or DEFAULTS.stripBorderName
+  DB.borderName = SafeString(ReadDBField(DB, "borderName")) or DEFAULTS.borderName
+  DB.bgName = SafeString(ReadDBField(DB, "bgName")) or DEFAULTS.bgName
+  DB.useMasque = nil
+  return DB
+end
+
+local function ResetDefaults()
+  _G.RothShinyBuffsDB = {}
+  return EnsureDefaults()
+end
+
+local function GetLSM()
+  local libStub = _G.LibStub
+  if type(libStub) ~= "function" then return nil end
+  local ok, library = pcall(libStub, "LibSharedMedia-3.0", true)
+  return ok and SafeTable(library) or nil
 end
 
 local function RegisterBuiltInMedia()
-  if not LSM or not LSM.Register then return end
-  local base = "Interface\\AddOns\\RothShinyBuffs\\media\\"
-  LSM:Register("border",     "RothShinyBuffs: Galaxy Strip", base .. "5.tga")
-  LSM:Register("border",     "RothShinyBuffs: Border64",     base .. "border64.tga")
-  LSM:Register("border",     "RothShinyBuffs: Border",       base .. "border.tga")
-  LSM:Register("background", "RothShinyBuffs: Solid",        base .. "Solid.tga")
+  local LSM = GetLSM()
+  if not LSM or type(LSM.Register) ~= "function" then return end
+  pcall(LSM.Register, LSM, "border", "RothShinyBuffs: Galaxy Strip", FALLBACK_MEDIA.strip)
+  pcall(LSM.Register, LSM, "border", "RothShinyBuffs: Border64", FALLBACK_MEDIA.border)
+  pcall(LSM.Register, LSM, "border", "RothShinyBuffs: Border", "Interface\\AddOns\\RothShinyBuffs\\media\\border.tga")
+  pcall(LSM.Register, LSM, "background", "RothShinyBuffs: Solid", FALLBACK_MEDIA.background)
 end
 
-local function ResolveMedia()
-  EnsureDefaults()
-  if not LSM then
-    -- Absolute fallback (should not happen, LSM is embedded)
-    cfg.stripTex  = "Interface\\AddOns\\RothShinyBuffs\\media\\5.tga"
-    cfg.borderTex = "Interface\\AddOns\\RothShinyBuffs\\media\\border64.tga"
-    cfg.bgTex     = "Interface\\AddOns\\RothShinyBuffs\\media\\Solid.tga"
-  else
-    cfg.stripTex  = LSM:Fetch("border",     DB.stripBorderName, true)
-    cfg.borderTex = LSM:Fetch("border",     DB.borderName,      true)
-    cfg.bgTex     = LSM:Fetch("background", DB.bgName,          true)
+local function FetchMedia(kind, name, fallback)
+  local LSM = GetLSM()
+  if LSM and type(LSM.Fetch) == "function" and SafeString(name) then
+    local ok, path = pcall(LSM.Fetch, LSM, kind, name, true)
+    path = ok and SafeString(path) or nil
+    if path and path ~= "" then return path end
   end
-
-  cfg.bgColor = DB.bgColor
-  cfg.borderColor = DB.borderColor
-
-  cfg.iconCrop = tonumber(DB.iconCrop) or DEFAULTS.iconCrop
-  cfg.edgeSize = tonumber(DB.edgeSize) or DEFAULTS.edgeSize
-  cfg.outset   = tonumber(DB.outset)   or DEFAULTS.outset
-  cfg.bgOutset = tonumber(DB.bgOutset) or DEFAULTS.bgOutset
+  return fallback
 end
 
-------------------------------------------------------------
--- Aura button helpers
-------------------------------------------------------------
-local function GetIcon(btn)
-  if not btn then return nil end
-  return btn.Icon or btn.icon or btn.IconTexture
+local function ResolveConfig()
+  EnsureDefaults()
+  config.stripTexture = FetchMedia("border", DB.stripBorderName, FALLBACK_MEDIA.strip)
+  config.borderTexture = FetchMedia("border", DB.borderName, FALLBACK_MEDIA.border)
+  config.backgroundTexture = FetchMedia("background", DB.bgName, FALLBACK_MEDIA.background)
+  config.bgColor = CopyColor(DB.bgColor, DEFAULTS.bgColor)
+  config.borderColor = CopyColor(DB.borderColor, DEFAULTS.borderColor)
+  config.iconCrop = DB.iconCrop
+  config.edgeSize = DB.edgeSize
+  config.outset = DB.outset
+  config.bgOutset = DB.bgOutset
 end
 
-local function HideDefaultBorders(btn)
-  if not btn then return end
-  local hide = {
-    btn.Border, btn.border,
-    btn.IconBorder, btn.DebuffBorder, btn.TempEnchantBorder,
-    btn.BorderFrame,
+local function IsPublicAuraIcon(icon)
+  if not CanUseObject(icon) or not Method(icon, "SetTexCoord") then return false end
+  return SafeString(SafeGet(icon, "GetObjectType")) == "Texture"
+end
+
+local function GetPublicIcon(button)
+  if not CanUseObject(button) then return nil end
+  local icon = SafeField(button, "Icon")
+  return IsPublicAuraIcon(icon) and icon or nil
+end
+
+local function CaptureTexCoord(icon)
+  local method = Method(icon, "GetTexCoord")
+  if not method then return { 0, 1, 0, 1 } end
+  local values = { pcall(method, icon) }
+  if not values[1] then return { 0, 1, 0, 1 } end
+  table.remove(values, 1)
+  local ordinary = {}
+  for index = 1, math.min(8, #values) do
+    local number = SafeNumber(values[index])
+    if number == nil then break end
+    ordinary[#ordinary + 1] = number
+  end
+  if #ordinary >= 8 then return ordinary end
+  if #ordinary >= 4 then return { ordinary[1], ordinary[2], ordinary[3], ordinary[4] } end
+  return { 0, 1, 0, 1 }
+end
+
+local function CreateTexture(button, layer, subLevel)
+  local method = Method(button, "CreateTexture")
+  if not method then return nil end
+  local ok, texture = pcall(method, button, nil, layer, nil, subLevel)
+  return ok and CanUseObject(texture) and texture or nil
+end
+
+local function SetColor(texture, color)
+  SafeCall(texture, "SetVertexColor", color[1], color[2], color[3], color[4])
+end
+
+local function SetShown(texture, shown)
+  SafeCall(texture, "SetShown", shown == true)
+end
+
+local function SetStripTile(texture, tileIndex)
+  local left = tileIndex * TILE_WIDTH
+  SafeCall(texture, "SetTexture", config.stripTexture)
+  SafeCall(texture, "SetTexCoord", left, left + TILE_WIDTH, 0, 1)
+end
+
+local function CreateState(button, icon)
+  local state = {
+    icon = icon,
+    originalTexCoord = CaptureTexCoord(icon),
+    background = CreateTexture(button, "BACKGROUND", -8),
+    fullBorder = nil,
+    strip = nil,
+    cropApplied = false,
   }
-  for _, r in ipairs(hide) do
-    if r and r.Hide then r:Hide() end
+  styledSlots[button] = state
+  return state
+end
+
+local function EnsureBackground(button, state)
+  if not state.background then state.background = CreateTexture(button, "BACKGROUND", -8) end
+  return state.background
+end
+
+local function EnsureFullBorder(button, state)
+  if not state.fullBorder then state.fullBorder = CreateTexture(button, "OVERLAY", 7) end
+  return state.fullBorder
+end
+
+local function EnsureStrip(button, state)
+  if state.strip then return state.strip end
+  local strip = {}
+  for index = 1, 8 do
+    strip[index] = CreateTexture(button, "OVERLAY", 7)
+    if not strip[index] then return nil end
+  end
+  state.strip = strip
+  return strip
+end
+
+local function HideState(state)
+  if not state then return end
+  SetShown(state.background, false)
+  SetShown(state.fullBorder, false)
+  if state.strip then for index = 1, 8 do SetShown(state.strip[index], false) end end
+  if state.cropApplied and IsPublicAuraIcon(state.icon) then
+    SafeCall(state.icon, "SetTexCoord", unpack(state.originalTexCoord))
+    state.cropApplied = false
   end
 end
 
-local TILE_W = 1 / 8
-
-local function SetStripTile(tex, stripTex, tileIndex)
-  local u1 = tileIndex * TILE_W
-  local u2 = (tileIndex + 1) * TILE_W
-  tex:SetTexture(stripTex)
-  tex:SetTexCoord(u1, u2, 0, 1)
+local function ApplyBackground(button, state)
+  local texture = EnsureBackground(button, state)
+  if not texture then return end
+  SafeCall(texture, "SetTexture", config.backgroundTexture)
+  SetColor(texture, config.bgColor)
+  SafeCall(texture, "ClearAllPoints")
+  SafeCall(texture, "SetPoint", "TOPLEFT", state.icon, "TOPLEFT", -config.bgOutset, config.bgOutset)
+  SafeCall(texture, "SetPoint", "BOTTOMRIGHT", state.icon, "BOTTOMRIGHT", config.bgOutset, -config.bgOutset)
+  SetShown(texture, DB.enabled and DB.showBG)
 end
 
-local function EnsureOverlayFrame(btn)
-  if btn.RSB_OverlayFrame then return btn.RSB_OverlayFrame end
-  local f = CreateFrame("Frame", nil, btn)
-  -- ensure our textures render behind the aura's icon
-  local lvl = (btn.GetFrameLevel and btn:GetFrameLevel()) or 0
-  if lvl > 0 then
-    f:SetFrameLevel(lvl - 1)
-  else
-    f:SetFrameLevel(0)
-  end
-  btn.RSB_OverlayFrame = f
-  return f
+local function ApplyFullBorder(button, state)
+  local border = EnsureFullBorder(button, state)
+  if not border then return end
+  SafeCall(border, "SetTexture", config.borderTexture)
+  SetColor(border, config.borderColor)
+  SafeCall(border, "ClearAllPoints")
+  SafeCall(border, "SetPoint", "TOPLEFT", state.icon, "TOPLEFT", -config.outset, config.outset)
+  SafeCall(border, "SetPoint", "BOTTOMRIGHT", state.icon, "BOTTOMRIGHT", config.outset, -config.outset)
+  SetShown(border, DB.enabled and DB.showBorder and DB.mode == "full_border")
+  if state.strip then for index = 1, 8 do SetShown(state.strip[index], false) end end
 end
 
-local function EnsureStrip(btn, icon)
-  if btn.RSB_Strip then return end
+local function ApplyStrip(button, state)
+  local strip = EnsureStrip(button, state)
+  if not strip then return end
+  local tl, top, tr, right, br, bottom, bl, left = unpack(strip)
+  local edge, outset = config.edgeSize, config.outset
 
-  local f = EnsureOverlayFrame(btn)
-
-  local bg = f:CreateTexture(nil, "BACKGROUND", nil, 0)
-  bg:SetTexture(cfg.bgTex)
-  bg:SetVertexColor(cfg.bgColor[1], cfg.bgColor[2], cfg.bgColor[3], cfg.bgColor[4])
-  bg:SetPoint("TOPLEFT", icon, "TOPLEFT", -cfg.bgOutset, cfg.bgOutset)
-  bg:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", cfg.bgOutset, -cfg.bgOutset)
-
-  local tl = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local t  = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local tr = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local r  = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local br = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local b  = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local bl = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  local l  = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-
-  local bc = cfg.borderColor
-  for _, tex in ipairs({tl,t,tr,r,br,b,bl,l}) do
-    tex:SetVertexColor(bc[1], bc[2], bc[3], bc[4])
+  for index = 1, 8 do
+    SetStripTile(strip[index], index - 1)
+    SetColor(strip[index], config.borderColor)
+    SetShown(strip[index], DB.enabled and DB.showBorder and DB.mode == "galaxy_strip")
   end
 
-  local edge = cfg.edgeSize
-  local outset = cfg.outset
-  local stripTex = cfg.stripTex
-
-  SetStripTile(tl, stripTex, 0); tl:SetSize(edge, edge); tl:SetPoint("TOPLEFT", icon, "TOPLEFT", -outset, outset)
-  SetStripTile(tr, stripTex, 2); tr:SetSize(edge, edge); tr:SetPoint("TOPRIGHT", icon, "TOPRIGHT", outset, outset)
-  SetStripTile(br, stripTex, 4); br:SetSize(edge, edge); br:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", outset, -outset)
-  SetStripTile(bl, stripTex, 6); bl:SetSize(edge, edge); bl:SetPoint("BOTTOMLEFT", icon, "BOTTOMLEFT", -outset, -outset)
-
-  SetStripTile(t, stripTex, 1)
-  t:SetPoint("TOPLEFT", tl, "TOPRIGHT", 0, 0)
-  t:SetPoint("BOTTOMRIGHT", tr, "BOTTOMLEFT", 0, 0)
-
-  SetStripTile(r, stripTex, 3)
-  r:SetPoint("TOPLEFT", tr, "BOTTOMLEFT", 0, 0)
-  r:SetPoint("BOTTOMRIGHT", br, "TOPRIGHT", 0, 0)
-
-  SetStripTile(b, stripTex, 5)
-  b:SetPoint("TOPLEFT", bl, "TOPRIGHT", 0, 0)
-  b:SetPoint("BOTTOMRIGHT", br, "BOTTOMLEFT", 0, 0)
-
-  SetStripTile(l, stripTex, 7)
-  l:SetPoint("TOPLEFT", tl, "BOTTOMLEFT", 0, 0)
-  l:SetPoint("BOTTOMRIGHT", bl, "TOPRIGHT", 0, 0)
-
-  btn.RSB_Strip = { bg=bg, tl=tl,t=t,tr=tr,r=r,br=br,b=b,bl=bl,l=l }
+  SafeCall(tl, "ClearAllPoints"); SafeCall(tl, "SetSize", edge, edge); SafeCall(tl, "SetPoint", "TOPLEFT", state.icon, "TOPLEFT", -outset, outset)
+  SafeCall(tr, "ClearAllPoints"); SafeCall(tr, "SetSize", edge, edge); SafeCall(tr, "SetPoint", "TOPRIGHT", state.icon, "TOPRIGHT", outset, outset)
+  SafeCall(br, "ClearAllPoints"); SafeCall(br, "SetSize", edge, edge); SafeCall(br, "SetPoint", "BOTTOMRIGHT", state.icon, "BOTTOMRIGHT", outset, -outset)
+  SafeCall(bl, "ClearAllPoints"); SafeCall(bl, "SetSize", edge, edge); SafeCall(bl, "SetPoint", "BOTTOMLEFT", state.icon, "BOTTOMLEFT", -outset, -outset)
+  SafeCall(top, "ClearAllPoints"); SafeCall(top, "SetPoint", "TOPLEFT", tl, "TOPRIGHT", 0, 0); SafeCall(top, "SetPoint", "BOTTOMRIGHT", tr, "BOTTOMLEFT", 0, 0)
+  SafeCall(right, "ClearAllPoints"); SafeCall(right, "SetPoint", "TOPLEFT", tr, "BOTTOMLEFT", 0, 0); SafeCall(right, "SetPoint", "BOTTOMRIGHT", br, "TOPRIGHT", 0, 0)
+  SafeCall(bottom, "ClearAllPoints"); SafeCall(bottom, "SetPoint", "TOPLEFT", bl, "TOPRIGHT", 0, 0); SafeCall(bottom, "SetPoint", "BOTTOMRIGHT", br, "BOTTOMLEFT", 0, 0)
+  SafeCall(left, "ClearAllPoints"); SafeCall(left, "SetPoint", "TOPLEFT", tl, "BOTTOMLEFT", 0, 0); SafeCall(left, "SetPoint", "BOTTOMRIGHT", bl, "TOPRIGHT", 0, 0)
+  SetShown(state.fullBorder, false)
 end
 
-local function ApplyStrip(btn, icon)
-  EnsureStrip(btn, icon)
-  local s = btn.RSB_Strip
-  if not s then return end
+local function StyleSlot(button)
+  local icon = GetPublicIcon(button)
+  if not icon then return false end
+  local state = styledSlots[button]
+  if not state or state.icon ~= icon then state = CreateState(button, icon) end
 
-  -- background
-  s.bg:SetTexture(cfg.bgTex)
-  s.bg:SetVertexColor(cfg.bgColor[1], cfg.bgColor[2], cfg.bgColor[3], cfg.bgColor[4])
-  s.bg:ClearAllPoints()
-  s.bg:SetPoint("TOPLEFT", icon, "TOPLEFT", -cfg.bgOutset, cfg.bgOutset)
-  s.bg:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", cfg.bgOutset, -cfg.bgOutset)
-
-  local bc = cfg.borderColor
-  local edge = cfg.edgeSize
-  local outset = cfg.outset
-  local stripTex = cfg.stripTex
-
-  for _,k in ipairs({"tl","t","tr","r","br","b","bl","l"}) do
-    local tex = s[k]
-    tex:SetTexture(stripTex)
-    tex:SetVertexColor(bc[1], bc[2], bc[3], bc[4])
-  end
-
-  -- corners
-  SetStripTile(s.tl, stripTex, 0); s.tl:SetSize(edge, edge); s.tl:ClearAllPoints(); s.tl:SetPoint("TOPLEFT", icon, "TOPLEFT", -outset, outset)
-  SetStripTile(s.tr, stripTex, 2); s.tr:SetSize(edge, edge); s.tr:ClearAllPoints(); s.tr:SetPoint("TOPRIGHT", icon, "TOPRIGHT", outset, outset)
-  SetStripTile(s.br, stripTex, 4); s.br:SetSize(edge, edge); s.br:ClearAllPoints(); s.br:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", outset, -outset)
-  SetStripTile(s.bl, stripTex, 6); s.bl:SetSize(edge, edge); s.bl:ClearAllPoints(); s.bl:SetPoint("BOTTOMLEFT", icon, "BOTTOMLEFT", -outset, -outset)
-
-  -- edges
-  SetStripTile(s.t, stripTex, 1)
-  s.t:ClearAllPoints()
-  s.t:SetPoint("TOPLEFT", s.tl, "TOPRIGHT", 0, 0)
-  s.t:SetPoint("BOTTOMRIGHT", s.tr, "BOTTOMLEFT", 0, 0)
-
-  SetStripTile(s.r, stripTex, 3)
-  s.r:ClearAllPoints()
-  s.r:SetPoint("TOPLEFT", s.tr, "BOTTOMLEFT", 0, 0)
-  s.r:SetPoint("BOTTOMRIGHT", s.br, "TOPRIGHT", 0, 0)
-
-  SetStripTile(s.b, stripTex, 5)
-  s.b:ClearAllPoints()
-  s.b:SetPoint("TOPLEFT", s.bl, "TOPRIGHT", 0, 0)
-  s.b:SetPoint("BOTTOMRIGHT", s.br, "BOTTOMLEFT", 0, 0)
-
-  SetStripTile(s.l, stripTex, 7)
-  s.l:ClearAllPoints()
-  s.l:SetPoint("TOPLEFT", s.tl, "BOTTOMLEFT", 0, 0)
-  s.l:SetPoint("BOTTOMRIGHT", s.bl, "TOPRIGHT", 0, 0)
-
-  SetOverlayVisibility(btn)
+  if not DB.enabled then HideState(state); return true end
+  SafeCall(icon, "SetTexCoord", config.iconCrop, 1 - config.iconCrop, config.iconCrop, 1 - config.iconCrop)
+  state.cropApplied = true
+  ApplyBackground(button, state)
+  if DB.mode == "full_border" then ApplyFullBorder(button, state) else ApplyStrip(button, state) end
+  return true
 end
 
-local function EnsureFullBorder(btn, icon)
-  if btn.RSB_Full then return end
-  local f = EnsureOverlayFrame(btn)
-
-  local bg = f:CreateTexture(nil, "BACKGROUND", nil, 0)
-  bg:SetTexture(cfg.bgTex)
-  bg:SetVertexColor(cfg.bgColor[1], cfg.bgColor[2], cfg.bgColor[3], cfg.bgColor[4])
-  bg:SetPoint("TOPLEFT", icon, "TOPLEFT", -cfg.bgOutset, cfg.bgOutset)
-  bg:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", cfg.bgOutset, -cfg.bgOutset)
-
-  local b = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  b:SetTexture(cfg.borderTex)
-  b:SetVertexColor(cfg.borderColor[1], cfg.borderColor[2], cfg.borderColor[3], cfg.borderColor[4])
-  b:SetPoint("TOPLEFT", icon, "TOPLEFT", -cfg.outset, cfg.outset)
-  b:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", cfg.outset, -cfg.outset)
-
-  btn.RSB_Full = { bg=bg, border=b }
+local function StyleArray(frame, count)
+  if not CanUseObject(frame) then return 0 end
+  local auraFrames = SafeTable(SafeField(frame, "auraFrames"))
+  if not auraFrames then return 0 end
+  local styled = 0
+  for index = 1, count do
+    local ok, button = pcall(function() return auraFrames[index] end)
+    if ok and CanAccess(button) and StyleSlot(button) then styled = styled + 1 end
+  end
+  return styled
 end
 
-local function ApplyFullBorder(btn, icon)
-  EnsureFullBorder(btn, icon)
-  local f = btn.RSB_Full
-  if not f then return end
-
-  f.bg:SetTexture(cfg.bgTex)
-  f.bg:SetVertexColor(cfg.bgColor[1], cfg.bgColor[2], cfg.bgColor[3], cfg.bgColor[4])
-  f.bg:ClearAllPoints()
-  f.bg:SetPoint("TOPLEFT", icon, "TOPLEFT", -cfg.bgOutset, cfg.bgOutset)
-  f.bg:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", cfg.bgOutset, -cfg.bgOutset)
-
-  f.border:SetTexture(cfg.borderTex)
-  f.border:SetVertexColor(cfg.borderColor[1], cfg.borderColor[2], cfg.borderColor[3], cfg.borderColor[4])
-  f.border:ClearAllPoints()
-  f.border:SetPoint("TOPLEFT", icon, "TOPLEFT", -cfg.outset, cfg.outset)
-  f.border:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", cfg.outset, -cfg.outset)
-
-  SetOverlayVisibility(btn)
+local function StyleSourceConfirmedSlots()
+  local count = StyleArray(_G.BuffFrame, BUFF_SLOT_COUNT) + StyleArray(_G.DebuffFrame, DEBUFF_SLOT_COUNT)
+  local deadlyFrame = CanAccess(_G.DeadlyDebuffFrame) and _G.DeadlyDebuffFrame or nil
+  local deadly = SafeField(deadlyFrame, "Debuff")
+  if StyleSlot(deadly) then count = count + 1 end
+  return count
 end
 
-local function SetOverlayVisibility(btn)
-  if btn.RSB_Strip then
-    btn.RSB_Strip.bg:SetShown(DB.showBG)
-    for _,k in ipairs({"tl","t","tr","r","br","b","bl","l"}) do
-      btn.RSB_Strip[k]:SetShown(DB.showBorder)
-    end
-  end
-  if btn.RSB_Full then
-    btn.RSB_Full.bg:SetShown(DB.showBG)
-    btn.RSB_Full.border:SetShown(DB.showBorder)
-  end
-end
-
-local function HideUnusedMode(btn)
-  if DB.mode == "galaxy_strip" then
-    if btn.RSB_Full then
-      btn.RSB_Full.bg:Hide()
-      btn.RSB_Full.border:Hide()
-    end
-  else
-    if btn.RSB_Strip then
-      btn.RSB_Strip.bg:Hide()
-      for _,k in ipairs({"tl","t","tr","r","br","b","bl","l"}) do
-        btn.RSB_Strip[k]:Hide()
-      end
-    end
-  end
-end
-
-------------------------------------------------------------
--- Masque integration (non-destructive)
--- We never let Masque touch Blizzard's aura button directly.
--- Instead, we create an overlay Frame and feed that to Masque.
-------------------------------------------------------------
-local function EnsureMasqueFrame(btn, icon)
-  if btn.RSB_MSQFrame then return btn.RSB_MSQFrame end
-
-  local f = CreateFrame("Frame", nil, btn)
-  f:SetAllPoints(icon) -- stays in sync with Blizzard sizing/layout
-  f:SetFrameStrata(btn:GetFrameStrata())
-  f:SetFrameLevel((btn:GetFrameLevel() or 0) + 5) -- above icon
-
-  local t = f:CreateTexture(nil, "ARTWORK")
-  t:SetAllPoints(f)
-  f.Icon = t
-
-  btn.RSB_MSQFrame = f
-  return f
-end
-
-local function MasqueAdd(btn, icon)
-  if not MSQ_Group then return end
-
-  local mf = EnsureMasqueFrame(btn, icon)
-  -- keep the overlay icon in sync
-  mf.Icon:SetTexture(icon:GetTexture())
-  if mf.Icon.SetTexCoord then
-    mf.Icon:SetTexCoord(0, 1, 0, 1)
-  end
-
-  -- Hide the original icon so Masque shapes/masks don't fight the default square icon.
-  if icon.SetAlpha then icon:SetAlpha(0) end
-  if icon.SetTexCoord then icon:SetTexCoord(0, 1, 0, 1) end
-
-  if not mf.RSB_MSQAdded then
-    -- Strict=true is implied for Frame objects, but we still pass Type="Aura" to use aura regions.
-    MSQ_Group:AddButton(mf, { Icon = mf.Icon }, "Aura", true)
-    mf.RSB_MSQAdded = true
-  end
-
-  -- Hide our custom overlays (if any)
-  if btn.RSB_Strip then
-    btn.RSB_Strip.bg:Hide()
-    for _,k in ipairs({"tl","t","tr","r","br","b","bl","l"}) do
-      btn.RSB_Strip[k]:Hide()
-    end
-  end
-  if btn.RSB_Full then
-    btn.RSB_Full.bg:Hide()
-    btn.RSB_Full.border:Hide()
-  end
-
-  -- Hide Blizzard borders to avoid double-frames
-  HideDefaultBorders(btn)
-end
-
-local function MasqueSetVisible(btn, visible)
-  if not btn or not btn.RSB_MSQFrame then return end
-  btn.RSB_MSQFrame:SetShown(visible)
-end
-
-------------------------------------------------------------
--- Styling
-------------------------------------------------------------
-local styleRevision = 0
-local function BumpRevision()
-  styleRevision = styleRevision + 1
-end
-
-local function StyleButton(btn)
-  if not btn or btn.isExample or btn.hasValidInfo == false then return end
-
-  local icon = GetIcon(btn)
-  if not icon or not icon.GetTexture then return end
-  local tex = icon:GetTexture()
-  if not tex then return end
-
-  -- de-dup on frequent UNIT_AURA
-  if btn.RSB_Rev == styleRevision then
-    -- if Masque is enabled we still need to keep the overlay icon texture in sync
-    if DB.useMasque and btn.RSB_MSQFrame and btn.RSB_MSQFrame.Icon then
-      btn.RSB_MSQFrame.Icon:SetTexture(tex)
-    end
-    return
-  end
-
-  if DB.useMasque then
-    InitMasque()
-    if MSQ_Group then
-      MasqueAdd(btn, icon)
-      MasqueSetVisible(btn, true)
-      btn.RSB_Rev = styleRevision
-      return
-    end
-    -- Masque requested but not present => fall back to our overlays
-  end
-
-  -- Not using Masque: ensure Masque overlay is hidden
-  MasqueSetVisible(btn, false)
-
-  -- Crop icon (classic Roth look)
-  if icon.SetAlpha then icon:SetAlpha(1) end
-  local c = cfg.iconCrop
-  if icon.SetTexCoord then
-    icon:SetTexCoord(c, 1 - c, c, 1 - c)
-  end
-
-  HideDefaultBorders(btn)
-  HideUnusedMode(btn)
-
-  if DB.mode == "galaxy_strip" then
-    ApplyStrip(btn, icon)
-  else
-    ApplyFullBorder(btn, icon)
-  end
-
-  btn.RSB_Rev = styleRevision
-end
-
-------------------------------------------------------------
--- Scanning (only active aura buttons, throttled)
-------------------------------------------------------------
-local function IteratePool(pool)
-  if not pool or not pool.EnumerateActive then return end
-  for btn in pool:EnumerateActive() do
-    StyleButton(btn)
-  end
-end
-
-local function ScanContainer(container)
-  if not container then return end
-  -- Most modern aura containers use pools
-  IteratePool(container.buttonPool)
-  IteratePool(container.auraButtonPool)
-  IteratePool(container.auraPool)
-  IteratePool(container.buffPool)
-  IteratePool(container.debuffPool)
-
-  -- Fallback: common tables
-  local t = container.auraFrames or container.auraButtons or container.buttons
-  if type(t) == "table" then
-    for _, btn in pairs(t) do
-      StyleButton(btn)
-    end
-  end
-end
-
-local function GetAuraContainers()
-  local list = {}
-  local function add(f) if f then list[#list+1] = f end end
-
-  -- Retail aura frames
-  if _G.BuffFrame then
-    add(_G.BuffFrame.AuraContainer)
-    add(_G.BuffFrame.buffContainer)
-    add(_G.BuffFrame.debuffContainer)
-  end
-  if _G.DebuffFrame then
-    add(_G.DebuffFrame.AuraContainer)
-    add(_G.DebuffFrame.buffContainer)
-    add(_G.DebuffFrame.debuffContainer)
-  end
-
-  return list
-end
-
-local lastReq = 0
-local pending = false
-local MIN_REQ_INTERVAL = 0.30
-
-local function DoUpdate()
-  pending = false
-  if DB.enabled == false then return end
-  ResolveMedia()
-
-  local containers = GetAuraContainers()
-  for i = 1, #containers do
-    ScanContainer(containers[i])
-  end
-end
-
-local function RequestUpdate()
-  local now = GetTimePreciseSec and GetTimePreciseSec() or GetTime()
-  if (now - lastReq) < MIN_REQ_INTERVAL then return end
-  lastReq = now
-  if pending then return end
-  pending = true
-  C_Timer.After(0.05, DoUpdate)
-end
-
-function RothShinyBuffs_ApplySettings()
+local function ApplySettings()
   EnsureDefaults()
-  ResolveMedia()
-  BumpRevision()
-  if DB.useMasque then
-    InitMasque()
-    if MSQ_Group and MSQ_Group.ReSkin then
-      MSQ_Group:ReSkin()
-    end
+  if InCombat() then pendingApply = true; return false end
+  ResolveConfig()
+  pendingApply = false
+  StyleSourceConfirmedSlots()
+  for button, state in pairs(styledSlots) do
+    if CanUseObject(button) and state then StyleSlot(button) end
   end
-  RequestUpdate()
+  return true
 end
 
-------------------------------------------------------------
--- Events
-------------------------------------------------------------
-EnsureDefaults()
-RegisterBuiltInMedia()
-ResolveMedia()
-
-local ev = CreateFrame("Frame")
-ev:RegisterEvent("PLAYER_LOGIN")
-ev:RegisterEvent("PLAYER_ENTERING_WORLD")
-ev:RegisterEvent("UNIT_AURA")
-ev:RegisterEvent("ADDON_LOADED")
-
-ev:SetScript("OnEvent", function(_, event, arg1)
-  if event == "UNIT_AURA" then
-    if arg1 == "player" then
-      RequestUpdate()
-    end
-    return
+local function GetStyledCount()
+  local count = 0
+  for button, state in pairs(styledSlots) do
+    if CanUseObject(button) and state then count = count + 1 end
   end
+  return count
+end
 
+local function Print(message)
+  if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then DEFAULT_CHAT_FRAME:AddMessage(message) elseif print then print(message) end
+end
+
+local function RegisterSlash()
+  SLASH_ROTHSHINYBUFFS1 = "/rsb"
+  SlashCmdList.ROTHSHINYBUFFS = function(message)
+    message = SafeString(message)
+    message = message and message:lower():gsub("^%s+", ""):gsub("%s+$", "") or ""
+    if message == "toggle" then
+      DB.enabled = not DB.enabled
+      ApplySettings()
+      Print("|cff00ff00RothShinyBuffs|r " .. (DB.enabled and "enabled" or "disabled"))
+    elseif message == "reset" then
+      ResetDefaults()
+      ApplySettings()
+      Print("|cff00ff00RothShinyBuffs|r settings reset.")
+    elseif message == "config" and _G.RothShinyBuffs_SettingsCategoryID and Settings then
+      Settings.OpenToCategory(_G.RothShinyBuffs_SettingsCategoryID)
+    else
+      Print("|cff00ff00RothShinyBuffs|r: /rsb toggle | reset | config")
+      Print(string.format("Static public slots styled: %d; pending: %s", GetStyledCount(), pendingApply and "yes" or "no"))
+    end
+  end
+end
+
+local EventFrame = CreateFrame("Frame")
+for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_ENABLED" }) do
+  EventFrame:RegisterEvent(event)
+end
+EventFrame:SetScript("OnEvent", function(_, event, argument)
   if event == "ADDON_LOADED" then
-    -- Ensure we rescan once BuffFrame is available.
-    if arg1 == "Blizzard_BuffFrame" then
-      RequestUpdate()
+    local name = SafeString(argument)
+    if name == ADDON_NAME then
+      EnsureDefaults()
+      RegisterBuiltInMedia()
+    elseif name == "Blizzard_BuffFrame" and initialized then
+      ApplySettings()
     end
-    return
+  elseif event == "PLAYER_LOGIN" then
+    EnsureDefaults()
+    RegisterBuiltInMedia()
+    RegisterSlash()
+    initialized = true
+    ApplySettings()
+  elseif event == "PLAYER_ENTERING_WORLD" then
+    if initialized then ApplySettings() end
+  elseif event == "PLAYER_REGEN_ENABLED" and pendingApply then
+    ApplySettings()
   end
-
-  if event == "PLAYER_LOGIN" then
-    -- Multiple delayed passes to catch late-created aura buttons.
-    C_Timer.After(0, DoUpdate)
-    C_Timer.After(0.25, DoUpdate)
-    C_Timer.After(1.0, DoUpdate)
-    return
-  end
-
-  RequestUpdate()
 end)
+
+_G.RothShinyBuffs_EnsureDefaults = EnsureDefaults
+_G.RothShinyBuffs_ResetDefaults = ResetDefaults
+_G.RothShinyBuffs_ApplySettings = ApplySettings
+_G.RothShinyBuffs_Runtime = {
+  Apply = ApplySettings,
+  GetStyledCount = GetStyledCount,
+  IsPending = function() return pendingApply end,
+  GetBuffSlotLimit = function() return BUFF_SLOT_COUNT end,
+  GetDebuffSlotLimit = function() return DEBUFF_SLOT_COUNT end,
+}

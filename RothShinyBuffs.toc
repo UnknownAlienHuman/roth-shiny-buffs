@@ -1,10 +1,10 @@
-## Interface: 120000
+## Interface: 120100
 ## Title: RothShinyBuffs
-## Notes: Galaxy-style aura frames (SharedMedia + optional Masque), Edit Mode friendly
+## Notes: Static-slot Galaxy-style art for Blizzard-owned BuffFrame and DebuffFrame buttons on Retail 12.1.
 ## Author: Galaxy (Roth UI) / Neomorph
-## Version: 0.40
+## Version: 0.5.0
 ## SavedVariables: RothShinyBuffsDB
-## OptionalDeps: Masque
+## X-Verified-Build: 12.1.0.69497
 
 libs\LibStub\LibStub.lua
 libs\CallbackHandler-1.0\CallbackHandler-1.0.lua

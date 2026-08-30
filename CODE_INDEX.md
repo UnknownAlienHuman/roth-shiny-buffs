@@ -1,10 +1,12 @@
-# Code index
+# RothShinyBuffs code index
 
-| File or directory | Responsibility / exact anchors |
-| --- | --- |
-| [`core.lua`](core.lua) | `EnsureDefaults`, `ResolveMedia`, `StyleButton`, `ScanContainer`, `DoUpdate`, `RequestUpdate`, `RothShinyBuffs_ApplySettings`; owns DB, event frame, overlays and Masque bridge |
-| [`options.lua`](options.lua) | `RegisterPanel`, `Build`, `Refresh`, control setters; writes DB then invokes `RothShinyBuffs_ApplySettings` |
-| [`libs/`](libs/) | bundled `LibStub`, `CallbackHandler-1.0`, `LibSharedMedia-3.0` |
-| [`media/`](media/) | bundled border/background textures registered by `RegisterBuiltInMedia` |
+| File or directory | Responsibility |
+|---|---|
+| `RothShinyBuffs.toc` | Retail 12.1 metadata, bundled library paths, SavedVariables and definitive load order |
+| `core.lua` | Defaults/migration, accessibility gates, LibSharedMedia registration/resolution, fixed public slot ranges, addon-owned background/border textures, crop restore, slash commands and combat-deferred apply |
+| `options.lua` | Current Blizzard canvas Settings category for visual mode, crop, geometry, media, colors and reset |
+| `tests/test_static_slots.lua` | Mocked regression for 32 buff slots, 16 debuff slots, DeadlyDebuffFrame, private-anchor exclusion, no active-state scan and combat deferral |
+| `Libs/` | Bundled LibStub, CallbackHandler-1.0 and LibSharedMedia-3.0 |
+| `media/` | Bundled Galaxy strip, full-border and background textures |
 
-Entry is TOC-driven; there is no slash command or separate service layer. `RothShinyBuffsDB` is the only persistent state.
+`RothShinyBuffsDB` is the only persistent state. Detailed ownership and the 12.1 source boundary are in [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`AGENT_GUIDE.md`](AGENT_GUIDE.md).
